@@ -1,106 +1,125 @@
 #!/usr/bin/env python3
-"""
-Port Scanner - Starter Template for Students
-Assignment 2: Network Security
-
-This is a STARTER TEMPLATE to help you get started.
-You should expand and improve upon this basic implementation.
-
-TODO for students:
-1. Implement multi-threading for faster scans
-2. Add banner grabbing to detect services
-3. Add support for CIDR notation (e.g., 192.168.1.0/24)
-4. Add different scan types (SYN scan, UDP scan, etc.)
-5. Add output formatting (JSON, CSV, etc.)
-6. Implement timeout and error handling
-7. Add progress indicators
-8. Add service fingerprinting
-"""
-
+import argparse
 import socket
 import sys
+import time
+from typing import List, Tuple
 
 
-def scan_port(target, port, timeout=1.0):
-    """
-    Scan a single port on the target host
+def parse_ports(spec: str) -> List[int]:
+    """Accepts '1-1000' or '22,80,443' or mixed '1-1024,3306'."""
+    ports = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            start, end = int(a), int(b)
+            if start > end:
+                start, end = end, start
+            for p in range(start, end + 1):
+                ports.add(p)
+        else:
+            ports.add(int(part))
 
-    Args:
-        target (str): IP address or hostname to scan
-        port (int): Port number to scan
-        timeout (float): Connection timeout in seconds
+    ports_list = sorted(ports)
+    for p in ports_list:
+        if p < 1 or p > 65535:
+            raise ValueError(f"Invalid port {p}. Must be 1-65535.")
+    return ports_list
 
-    Returns:
-        bool: True if port is open, False otherwise
-    """
+
+def grab_banner(sock: socket.socket) -> str:
+    """Try to read a small banner after connecting."""
     try:
-        # TODO: Create a socket
-        # TODO: Set timeout
-        # TODO: Try to connect to target:port
-        # TODO: Close the socket
-        # TODO: Return True if connection successful
+        data = sock.recv(512)
+        if not data:
+            return ""
+        text = data.decode(errors="replace").strip()
+        return " ".join(text.split())[:120]
+    except (socket.timeout, OSError):
+        return ""
 
-        pass  # Remove this and implement
 
+def guess_service(port: int, banner: str) -> str:
+    b = banner.lower()
+    if port == 3306 or "mysql" in b:
+        return "MySQL"
+    if port == 6379 or "redis" in b:
+        return "Redis"
+    if port in (80, 443, 5000, 5001, 8888) or "http" in b:
+        return "HTTP"
+    if port in (22, 2222) or "ssh" in b:
+        return "SSH"
+    return "Unknown" if banner else ""
+
+
+def scan_port(target: str, port: int, timeout: float) -> Tuple[bool, float, str, str]:
+    """TCP connect scan a single port. Returns open?, rtt_ms, banner, service_guess."""
+    t0 = time.perf_counter()
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((target, port))
+        rtt_ms = (time.perf_counter() - t0) * 1000.0
+        s.settimeout(0.5)
+        banner = grab_banner(s)
+        service = guess_service(port, banner)
+        return True, rtt_ms, banner, service
     except (socket.timeout, ConnectionRefusedError, OSError):
-        return False
+        rtt_ms = (time.perf_counter() - t0) * 1000.0
+        return False, rtt_ms, "", ""
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
 
 
-def scan_range(target, start_port, end_port):
-    """
-    Scan a range of ports on the target host
+def main() -> None:
+    parser = argparse.ArgumentParser(description="CSCE 413 A2 - TCP Connect Port Scanner")
+    parser.add_argument("--target", required=True, help="Target hostname/IP (e.g., secret_api, webapp, 172.20.0.5)")
+    parser.add_argument("--ports", required=True, help='Ports (e.g., "1-10000" or "22,80,443")')
+    parser.add_argument("--timeout", type=float, default=1.0, help="Connect timeout seconds (default 1.0)")
+    args = parser.parse_args()
 
-    Args:
-        target (str): IP address or hostname to scan
-        start_port (int): Starting port number
-        end_port (int): Ending port number
-
-    Returns:
-        list: List of open ports
-    """
-    open_ports = []
-
-    print(f"[*] Scanning {target} from port {start_port} to {end_port}")
-    print(f"[*] This may take a while...")
-
-    # TODO: Implement the scanning logic
-    # Hint: Loop through port range and call scan_port()
-    # Hint: Consider using threading for better performance
-
-    for port in range(start_port, end_port + 1):
-        # TODO: Scan this port
-        # TODO: If open, add to open_ports list
-        # TODO: Print progress (optional)
-        pass  # Remove this and implement
-
-    return open_ports
-
-
-def main():
-    """Main function"""
-    # TODO: Parse command-line arguments
-    # TODO: Validate inputs
-    # TODO: Call scan_range()
-    # TODO: Display results
-
-    # Example usage (you should improve this):
-    if len(sys.argv) < 2:
-        print("Usage: python3 port_scanner_template.py <target>")
-        print("Example: python3 port_scanner_template.py 172.20.0.10")
+    # Resolve target early for nicer errors
+    try:
+        resolved = socket.gethostbyname(args.target)
+    except socket.gaierror:
+        print(f"[!] Could not resolve target: {args.target}")
         sys.exit(1)
 
-    target = sys.argv[1]
-    start_port = 1
-    end_port = 1024  # Scan first 1024 ports by default
+    try:
+        ports = parse_ports(args.ports)
+    except ValueError as e:
+        print(f"[!] {e}")
+        sys.exit(1)
 
-    print(f"[*] Starting port scan on {target}")
+    print(f"[*] Target: {args.target} ({resolved})")
+    print(f"[*] Ports: {ports[0]}-{ports[-1]} ({len(ports)} total)")
+    print(f"[*] Timeout: {args.timeout}s\n")
 
-    open_ports = scan_range(target, start_port, end_port)
+    open_ports = []
+    for i, port in enumerate(ports, start=1):
+        is_open, rtt_ms, banner, service = scan_port(args.target, port, args.timeout)
+        state = "open" if is_open else "closed"
 
-    print(f"\n[+] Scan complete!")
-    print(f"[+] Found {len(open_ports)} open ports:")
-    for port in open_ports:
-        print(f"    Port {port}: open")
+        # Required: show port, state, timing
+        print(f"Port {port:5d}: {state:6s} | {rtt_ms:7.1f} ms", end="")
+        if is_open:
+            if service:
+                print(f" | {service}", end="")
+            if banner:
+                print(f" | banner: {banner}", end="")
+            open_ports.append(port)
+        print()
+
+    print("\n[+] Scan complete")
+    print(f"[+] Open ports found: {len(open_ports)}")
+    if open_ports:
+        print("[+] Open port list:", ", ".join(map(str, open_ports)))
 
 
 if __name__ == "__main__":
